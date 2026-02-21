@@ -37,7 +37,7 @@ function downloadFile(url: string, dest: string, label: string = 'Baixando Arqui
 
       client.get(downloadUrl, (response) => {
         // Handle Redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
+        if (response.statusCode !== undefined && response.statusCode >= 300 && response.statusCode < 400) {
           if (response.headers.location) {
             console.log(`Redirecting to: ${response.headers.location}`)
             handleDownload(response.headers.location)
@@ -107,7 +107,7 @@ function getRemoteFileHeaders(url: string): Promise<any> {
     const handleRequest = (requestUrl: string) => {
       const client = requestUrl.startsWith('https') ? https : http
       const req = client.request(requestUrl, { method: 'HEAD' }, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
+        if (res.statusCode !== undefined && res.statusCode >= 300 && res.statusCode < 400) {
           if (res.headers.location) {
             handleRequest(res.headers.location)
             return
@@ -438,6 +438,161 @@ async function syncMods(root: string) {
   }
 }
 
+// Enable resource pack in options.txt automatically
+function enableResourcePack(root: string, packName: string) {
+  const optionsPath = path.join(root, 'options.txt');
+  const packEntry = `"file/${packName}"`;
+
+  if (!fs.existsSync(optionsPath)) {
+    fs.writeFileSync(optionsPath, `resourcePacks:["vanilla",${packEntry}]\n`, 'utf-8');
+    return;
+  }
+
+  try {
+    let content = fs.readFileSync(optionsPath, 'utf-8');
+    const lines = content.split('\n');
+    let modified = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('resourcePacks:')) {
+        const match = lines[i].match(/resourcePacks:\[(.*)\]/);
+        if (match) {
+          const currentPacksStr = match[1].trim();
+          const currentPacks = currentPacksStr ? currentPacksStr.split(',').map(s => s.trim()) : [];
+          if (!currentPacks.includes(packEntry)) {
+            currentPacks.push(packEntry);
+            lines[i] = `resourcePacks:[${currentPacks.join(',')}]`;
+            modified = true;
+          }
+        } else {
+          lines[i] = `resourcePacks:["vanilla",${packEntry}]`;
+          modified = true;
+        }
+        break; // found the line
+      }
+    }
+
+    if (modified) {
+      fs.writeFileSync(optionsPath, lines.join('\n'), 'utf-8');
+      console.log(`Enabled resource pack: ${packName}`);
+    }
+  } catch (err) {
+    console.error("Failed to enable resource pack automatically:", err);
+  }
+}
+
+// Sync Resource Pack
+async function syncResourcePack(root: string) {
+  const configUrl = "https://raw.githubusercontent.com/Teneron/Pikamon-Launcher-Releases/main/public/launcher-config.json";
+  let rpUrl = "";
+
+  try {
+    if (win) win.webContents.send('game:log', `[UPDATE] Verificando pacote de texturas do servidor...`);
+    const { data } = await import('axios').then(a => a.default.get(configUrl));
+    rpUrl = data.resourcePackUrl;
+  } catch (err) {
+    console.error("Failed to fetch dynamic config for resource pack:", err);
+    // Fallback link in case GitHub is down
+    rpUrl = "https://www.dropbox.com/scl/fi/gcmkwkuwposkprg8nxdjm/Pikamon.zip?rlkey=9askwg6s3ba0pbc2ti4j6a5w2&st=9ldlutjb&dl=1";
+  }
+
+  if (!rpUrl) {
+    console.log("No Resource Pack URL configured, skipping.");
+    return;
+  }
+
+  const rpDir = path.join(root, 'resourcepacks');
+  if (!fs.existsSync(rpDir)) {
+    fs.mkdirSync(rpDir, { recursive: true });
+  }
+
+  const rpInfoPath = path.join(root, 'resourcepack_info.json');
+  // Enforce a specific name for the server pack so it's easy to select in-game
+  const destPath = path.join(rpDir, 'Pikamon.zip');
+  const tempZipPath = path.join(app.getPath('temp'), 'Pikamon_Update.zip');
+
+  try {
+    let shouldDownload = true;
+    let remoteEtag = "";
+    let remoteSize = "";
+
+    try {
+      const headers = await getRemoteFileHeaders(rpUrl);
+      remoteEtag = headers.etag || "";
+      remoteSize = headers['content-length'] || "";
+
+      if (fs.existsSync(rpInfoPath)) {
+        try {
+          const localInfo = JSON.parse(fs.readFileSync(rpInfoPath, 'utf-8'));
+          if (localInfo.etag === remoteEtag && localInfo.size === remoteSize && remoteEtag !== "") {
+            console.log("Resource pack is up to date (ETag matched).");
+            shouldDownload = false;
+          }
+        } catch (e) { /* ignore json error */ }
+      }
+    } catch (headErr) {
+      console.warn("Failed to check remote headers for resource pack, defaulting to download if missing", headErr);
+      if (fs.existsSync(destPath)) {
+        shouldDownload = false; // Keep existing if offline
+      }
+    }
+
+    if (!shouldDownload) {
+      enableResourcePack(root, 'Pikamon.zip');
+      return;
+    }
+
+    if (win) win.webContents.send('game:log', `[RPACK] Baixando Novo Pacote de Texturas...`);
+
+    try {
+      if (win) win.webContents.send('game:log', `[RPACK] Iniciando download...`);
+      await downloadFile(rpUrl, tempZipPath, "Baixando Texturas...");
+
+      // Verify file size loosely
+      const stat = fs.statSync(tempZipPath);
+      if (stat.size < 1000) {
+        throw new Error(`Arquivo muito pequeno (${stat.size} bytes). Download incompleto.`);
+      }
+
+      // Check ZIP magic bytes 
+      const fd = fs.openSync(tempZipPath, 'r');
+      const buffer = Buffer.alloc(4);
+      fs.readSync(fd, buffer, 0, 4, 0);
+      fs.closeSync(fd);
+      const isZipParams = (buffer[0] === 0x50 && buffer[1] === 0x4B && buffer[2] === 0x03 && buffer[3] === 0x04);
+
+      if (!isZipParams) {
+        throw new Error(`O arquivo baixado não é um ZIP válido (Bytes: ${buffer.toString('hex')}).`);
+      }
+
+      // Move temp file to actual resource pack folder destination
+      if (fs.existsSync(destPath)) {
+        fs.unlinkSync(destPath); // Remove old pack
+      }
+      fs.copyFileSync(tempZipPath, destPath);
+
+      // Save cache info
+      fs.writeFileSync(rpInfoPath, JSON.stringify({ etag: remoteEtag, size: remoteSize }, null, 2));
+
+      console.log("Resource pack synced successfully");
+      if (win) win.webContents.send('game:log', `[RPACK] Texturas atualizadas com sucesso!`);
+
+      enableResourcePack(root, 'Pikamon.zip');
+
+    } catch (dErr) {
+      if (win) win.webContents.send('game:log', `[ERROR] Falha no download das texturas: ${dErr}`);
+      throw dErr;
+    }
+
+  } catch (e) {
+    console.error("Failed to sync resource pack", e);
+    if (win) win.webContents.send('game:log', `[ERROR] Falha ao atualizar texturas: ${e}`);
+  } finally {
+    if (fs.existsSync(tempZipPath)) fs.unlinkSync(tempZipPath);
+  }
+}
+
+
 
 
 // The built directory structure
@@ -642,6 +797,14 @@ ipcMain.handle('game:launch', async (_event: any, options: any) => {
     } catch (err) {
       console.error("Mod sync failed but continuing launch:", err)
       if (win) win.webContents.send('game:log', `[WARNING] Falha ao sincronizar mods (continuando assim mesmo): ${err}`)
+    }
+
+    // Sync Resource Pack (Non-blocking)
+    try {
+      await syncResourcePack(opts.root)
+    } catch (err) {
+      console.error("Resource pack sync failed but continuing launch:", err)
+      if (win) win.webContents.send('game:log', `[WARNING] Falha ao sincronizar texturas (continuando assim mesmo): ${err}`)
     }
 
     // Ensure Forge
