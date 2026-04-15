@@ -30,15 +30,14 @@ function downloadFile(url: string, dest: string, label: string = 'Baixando Arqui
       }
     }
 
-    const file = fs.createWriteStream(dest)
-
     const handleDownload = (downloadUrl: string) => {
       const client = downloadUrl.startsWith('https') ? https : http
 
       client.get(downloadUrl, (response) => {
-        // Handle Redirects
+        // Handle Redirects - follow before opening file stream
         if (response.statusCode !== undefined && response.statusCode >= 300 && response.statusCode < 400) {
           if (response.headers.location) {
+            response.resume() // consume/discard response body
             console.log(`Redirecting to: ${response.headers.location}`)
             handleDownload(response.headers.location)
             return
@@ -46,11 +45,12 @@ function downloadFile(url: string, dest: string, label: string = 'Baixando Arqui
         }
 
         if (response.statusCode !== 200) {
-          file.close()
-          fs.unlink(dest, () => { })
           reject(new Error(`Failed to download ${downloadUrl}: ${response.statusCode} ${response.statusMessage}`))
           return
         }
+
+        // Only open file stream after we have a 200 response (no more redirects)
+        const file = fs.createWriteStream(dest)
 
         const contentLength = response.headers['content-length']
         const total = contentLength ? parseInt(contentLength, 10) : 0
@@ -92,12 +92,12 @@ function downloadFile(url: string, dest: string, label: string = 'Baixando Arqui
         })
 
       }).on('error', (err) => {
-        fs.unlink(dest, () => { })
         reject(err)
       })
     }
 
     handleDownload(url)
+
   })
 }
 
@@ -488,9 +488,10 @@ async function syncSingleResourcePack(root: string, packName: string, packUrl: s
     fs.mkdirSync(rpDir, { recursive: true });
   }
 
-  const rpInfoPath = path.join(root, `resourcepack_info_${packName}.json`);
+  const packBaseName = packName.replace(/\.zip$/i, '');
+  const rpInfoPath = path.join(root, `resourcepack_info_${packBaseName}.json`);
   const destPath = path.join(rpDir, packName);
-  const tempZipPath = path.join(app.getPath('temp'), `${packName}_Update.zip`);
+  const tempZipPath = path.join(app.getPath('temp'), `${packBaseName}_Update.zip`);
 
   try {
     let shouldDownload = true;
