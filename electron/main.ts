@@ -481,35 +481,16 @@ function enableResourcePack(root: string, packName: string) {
   }
 }
 
-// Sync Resource Pack
-async function syncResourcePack(root: string) {
-  const configUrl = "https://raw.githubusercontent.com/Teneron/Pikamon-Launcher-Releases/main/public/launcher-config.json";
-  let rpUrl = "";
-
-  try {
-    if (win) win.webContents.send('game:log', `[UPDATE] Verificando pacote de texturas do servidor...`);
-    const { data } = await import('axios').then(a => a.default.get(configUrl));
-    rpUrl = data.resourcePackUrl;
-  } catch (err) {
-    console.error("Failed to fetch dynamic config for resource pack:", err);
-    // Fallback link in case GitHub is down
-    rpUrl = "https://www.dropbox.com/scl/fi/gcmkwkuwposkprg8nxdjm/Pikamon.zip?rlkey=9askwg6s3ba0pbc2ti4j6a5w2&st=9ldlutjb&dl=1";
-  }
-
-  if (!rpUrl) {
-    console.log("No Resource Pack URL configured, skipping.");
-    return;
-  }
-
+// Download and sync a single resource pack by name and URL
+async function syncSingleResourcePack(root: string, packName: string, packUrl: string) {
   const rpDir = path.join(root, 'resourcepacks');
   if (!fs.existsSync(rpDir)) {
     fs.mkdirSync(rpDir, { recursive: true });
   }
 
-  const rpInfoPath = path.join(root, 'resourcepack_info.json');
-  // Enforce a specific name for the server pack so it's easy to select in-game
-  const destPath = path.join(rpDir, 'Pikamon.zip');
-  const tempZipPath = path.join(app.getPath('temp'), 'Pikamon_Update.zip');
+  const rpInfoPath = path.join(root, `resourcepack_info_${packName}.json`);
+  const destPath = path.join(rpDir, packName);
+  const tempZipPath = path.join(app.getPath('temp'), `${packName}_Update.zip`);
 
   try {
     let shouldDownload = true;
@@ -517,7 +498,7 @@ async function syncResourcePack(root: string) {
     let remoteSize = "";
 
     try {
-      const headers = await getRemoteFileHeaders(rpUrl);
+      const headers = await getRemoteFileHeaders(packUrl);
       remoteEtag = headers.etag || "";
       remoteSize = headers['content-length'] || "";
 
@@ -525,36 +506,34 @@ async function syncResourcePack(root: string) {
         try {
           const localInfo = JSON.parse(fs.readFileSync(rpInfoPath, 'utf-8'));
           if (localInfo.etag === remoteEtag && localInfo.size === remoteSize && remoteEtag !== "") {
-            console.log("Resource pack is up to date (ETag matched).");
+            console.log(`Resource pack ${packName} is up to date (ETag matched).`);
             shouldDownload = false;
           }
         } catch (e) { /* ignore json error */ }
       }
     } catch (headErr) {
-      console.warn("Failed to check remote headers for resource pack, defaulting to download if missing", headErr);
+      console.warn(`Failed to check remote headers for ${packName}, defaulting to download if missing`, headErr);
       if (fs.existsSync(destPath)) {
-        shouldDownload = false; // Keep existing if offline
+        shouldDownload = false;
       }
     }
 
     if (!shouldDownload) {
-      enableResourcePack(root, 'Pikamon.zip');
+      enableResourcePack(root, packName);
       return;
     }
 
-    if (win) win.webContents.send('game:log', `[RPACK] Baixando Novo Pacote de Texturas...`);
+    if (win) win.webContents.send('game:log', `[RPACK] Baixando ${packName}...`);
 
     try {
-      if (win) win.webContents.send('game:log', `[RPACK] Iniciando download...`);
-      await downloadFile(rpUrl, tempZipPath, "Baixando Texturas...");
+      await downloadFile(packUrl, tempZipPath, `Baixando ${packName}...`);
 
-      // Verify file size loosely
       const stat = fs.statSync(tempZipPath);
       if (stat.size < 1000) {
         throw new Error(`Arquivo muito pequeno (${stat.size} bytes). Download incompleto.`);
       }
 
-      // Check ZIP magic bytes 
+      // Check ZIP magic bytes
       const fd = fs.openSync(tempZipPath, 'r');
       const buffer = Buffer.alloc(4);
       fs.readSync(fd, buffer, 0, 4, 0);
@@ -565,30 +544,69 @@ async function syncResourcePack(root: string) {
         throw new Error(`O arquivo baixado não é um ZIP válido (Bytes: ${buffer.toString('hex')}).`);
       }
 
-      // Move temp file to actual resource pack folder destination
       if (fs.existsSync(destPath)) {
-        fs.unlinkSync(destPath); // Remove old pack
+        fs.unlinkSync(destPath);
       }
       fs.copyFileSync(tempZipPath, destPath);
 
-      // Save cache info
       fs.writeFileSync(rpInfoPath, JSON.stringify({ etag: remoteEtag, size: remoteSize }, null, 2));
 
-      console.log("Resource pack synced successfully");
-      if (win) win.webContents.send('game:log', `[RPACK] Texturas atualizadas com sucesso!`);
+      console.log(`Resource pack ${packName} synced successfully`);
+      if (win) win.webContents.send('game:log', `[RPACK] ${packName} atualizado com sucesso!`);
 
-      enableResourcePack(root, 'Pikamon.zip');
+      enableResourcePack(root, packName);
 
     } catch (dErr) {
-      if (win) win.webContents.send('game:log', `[ERROR] Falha no download das texturas: ${dErr}`);
+      if (win) win.webContents.send('game:log', `[ERROR] Falha no download de ${packName}: ${dErr}`);
       throw dErr;
     }
 
   } catch (e) {
-    console.error("Failed to sync resource pack", e);
-    if (win) win.webContents.send('game:log', `[ERROR] Falha ao atualizar texturas: ${e}`);
+    console.error(`Failed to sync resource pack ${packName}`, e);
+    if (win) win.webContents.send('game:log', `[ERROR] Falha ao atualizar ${packName}: ${e}`);
   } finally {
     if (fs.existsSync(tempZipPath)) fs.unlinkSync(tempZipPath);
+  }
+}
+
+// Sync Resource Packs (main + additional from config)
+async function syncResourcePack(root: string) {
+  const configUrl = "https://raw.githubusercontent.com/Teneron/Pikamon-Launcher-Releases/main/public/launcher-config.json";
+  let rpUrl = "";
+  let additionalPacks: { name: string; url: string }[] = [];
+
+  try {
+    if (win) win.webContents.send('game:log', `[UPDATE] Verificando pacotes de texturas do servidor...`);
+    const { data } = await import('axios').then(a => a.default.get(configUrl));
+    rpUrl = data.resourcePackUrl;
+    if (data.resourcePacks && Array.isArray(data.resourcePacks)) {
+      additionalPacks = data.resourcePacks;
+    }
+  } catch (err) {
+    console.error("Failed to fetch dynamic config for resource pack:", err);
+    // Fallback links in case GitHub is down
+    rpUrl = "https://www.dropbox.com/scl/fi/gcmkwkuwposkprg8nxdjm/Pikamon.zip?rlkey=9askwg6s3ba0pbc2ti4j6a5w2&st=9ldlutjb&dl=1";
+    additionalPacks = [
+      { name: "PikamonI.zip", url: "https://www.dropbox.com/scl/fi/lgpwmwoegsz3xw13s657q/PikamonI.zip?rlkey=zpxap6d9wdiwz4n87nfxupi9p&st=6p2lzicg&dl=1" },
+      { name: "PikamonS.zip", url: "https://www.dropbox.com/scl/fi/epmnxfbahukz8my5lrdiv/PikamonS.zip?rlkey=jdiio5k6z6l99rq7gxkgktl5g&st=7sudesmr&dl=1" }
+    ];
+  }
+
+  // Sync main resource pack (Pikamon.zip)
+  if (rpUrl) {
+    await syncSingleResourcePack(root, 'Pikamon.zip', rpUrl);
+  }
+
+  // Sync additional resource packs (PikamonI.zip, PikamonS.zip, etc.)
+  for (const pack of additionalPacks) {
+    if (pack.name && pack.url) {
+      try {
+        await syncSingleResourcePack(root, pack.name, pack.url);
+      } catch (err) {
+        console.error(`Failed to sync additional resource pack ${pack.name}:`, err);
+        if (win) win.webContents.send('game:log', `[WARNING] Falha ao sincronizar ${pack.name}, continuando...`);
+      }
+    }
   }
 }
 
@@ -671,25 +689,59 @@ function createWindow() {
   }
 }
 
-// Auth Handler
+// Auth Handler - Pikamon Yggdrasil API
+const PIKAMON_AUTH_URL = 'https://pikamon.com.br/api/yggdrasil/authserver/authenticate';
+
 ipcMain.handle('auth:login', async (_event: any, args: any) => {
   try {
-    // Simplified Offline-Only Handler
-    const username = args.username || "Steve"
-    // Create a consistent UUID based on username (optional) or random
-    // Random is safer for "cracked" servers usually to avoid collisions if they use online UUIDs
-    const uuid = crypto.randomUUID().replace(/-/g, '')
+    const username = args.username || ""
+    const password = args.password || ""
 
-    return {
-      success: true,
-      profile: { name: username, id: uuid },
-      token: {
-        access_token: uuid,
-        client_token: uuid,
-        uuid: uuid,
-        name: username,
-        user_properties: "{}"
+    if (!username || !password) {
+      return { success: false, error: "Username e senha são obrigatórios." }
+    }
+
+    // Authenticate against Pikamon site Yggdrasil API
+    const axios = (await import('axios')).default;
+    
+    try {
+      const response = await axios.post(PIKAMON_AUTH_URL, {
+        username: username,
+        password: password,
+        clientToken: crypto.randomUUID().replace(/-/g, ''),
+      }, {
+        timeout: 10000,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      const data = response.data;
+      const profile = data.selectedProfile;
+
+      if (!profile) {
+        return { success: false, error: "Resposta inválida do servidor de autenticação." }
       }
+
+      return {
+        success: true,
+        profile: { name: profile.name, id: profile.id },
+        token: {
+          access_token: data.accessToken,
+          client_token: data.clientToken,
+          uuid: profile.id,
+          name: profile.name,
+          user_properties: "{}"
+        }
+      }
+    } catch (authError: any) {
+      if (authError.response) {
+        const errData = authError.response.data;
+        if (errData.errorMessage) {
+          return { success: false, error: errData.errorMessage }
+        }
+        return { success: false, error: "Credenciais inválidas. Verifique seu username/email e senha." }
+      }
+      // Network error - server might be down
+      return { success: false, error: "Não foi possível conectar ao servidor de autenticação. Verifique se o site está online." }
     }
   } catch (e) {
     console.error("Auth failed", e)
@@ -697,9 +749,78 @@ ipcMain.handle('auth:login', async (_event: any, args: any) => {
   }
 })
 
+// Open external URLs (for "Create Account" link)
+ipcMain.handle('open-external', async (_event: any, url: string) => {
+  const { shell } = await import('electron');
+  shell.openExternal(url);
+})
+
 // Game Launch Handler
 ipcMain.handle('game:launch', async (_event: any, options: any) => {
   const launcher = new Client()
+
+  // ========== SECURITY: Validate auth token before launching ==========
+  const PIKAMON_VALIDATE_URL = 'https://pikamon.com.br/api/yggdrasil/authserver/validate';
+  const PIKAMON_YGGDRASIL_URL = 'https://pikamon.com.br/api/yggdrasil';
+
+  if (!options.auth || !options.auth.access_token || !options.auth.name) {
+    return { success: false, error: "Autenticação obrigatória! Faça login com sua conta Pikamon." }
+  }
+
+  // Re-validate the access token against the auth server
+  try {
+    const axios = (await import('axios')).default;
+    await axios.post(PIKAMON_VALIDATE_URL, {
+      accessToken: options.auth.access_token,
+    }, { timeout: 10000 });
+    if (win) win.webContents.send('game:log', `[AUTH] Token validado com sucesso para ${options.auth.name}`);
+  } catch (validateErr: any) {
+    console.error("Token validation failed:", validateErr?.response?.status || validateErr.message);
+    return { 
+      success: false, 
+      error: "Sua sessão expirou ou é inválida. Faça login novamente com sua conta Pikamon." 
+    }
+  }
+
+  // ========== authlib-injector: Download if needed ==========
+  const authlibDir = path.join(app.getPath('appData'), '.launcher_1_21_1', 'authlib')
+  const authlibJar = path.join(authlibDir, 'authlib-injector.jar')
+
+  if (!fs.existsSync(authlibDir)) {
+    fs.mkdirSync(authlibDir, { recursive: true })
+  }
+
+  if (!fs.existsSync(authlibJar)) {
+    try {
+      if (win) win.webContents.send('game:log', '[SECURITY] Baixando authlib-injector para proteção de conta...')
+      await downloadFile(
+        'https://github.com/yushijinhun/authlib-injector/releases/download/v1.2.5/authlib-injector-1.2.5.jar',
+        authlibJar,
+        'Baixando Proteção de Conta...'
+      )
+      if (win) win.webContents.send('game:log', '[SECURITY] authlib-injector instalado com sucesso!')
+    } catch (dlErr) {
+      console.error("Failed to download authlib-injector:", dlErr)
+      if (win) win.webContents.send('game:log', `[WARNING] Falha ao baixar authlib-injector: ${dlErr}`)
+      // Continue without it - the server-side authlib will still protect
+    }
+  }
+
+  // ========== Build custom JVM args with authlib-injector ==========
+  const customJvmArgs: string[] = [
+    "-Djava.net.preferIPv6Addresses=system",
+    `-DignoreList=client-extra,neoforge-21.1.216.jar`,
+    `-Dminecraft.launcher.brand=Pikamon`,
+    `-Dbitcoin.j=null`,
+    `-Dorg.lwjgl.opengl.Window.name=Pikamon Client`,
+    `-DlibraryDirectory=${path.join(path.join(app.getPath('appData'), '.launcher_1_21_1'), 'libraries')}`,
+  ]
+
+  // Inject authlib-injector as a Java agent (points to our Yggdrasil API)
+  if (fs.existsSync(authlibJar)) {
+    customJvmArgs.unshift(`-javaagent:${authlibJar}=${PIKAMON_YGGDRASIL_URL}`)
+    if (win) win.webContents.send('game:log', '[SECURITY] authlib-injector ativo - proteção de conta habilitada')
+  }
 
   const opts = {
     authorization: options.auth,
@@ -715,12 +836,7 @@ ipcMain.handle('game:launch', async (_event: any, options: any) => {
     },
     javaPath: await ensureJava21(), // Enforce Java 21
     customArgs: [
-      "-Djava.net.preferIPv6Addresses=system",
-      `-DignoreList=client-extra,neoforge-21.1.216.jar`,
-      `-Dminecraft.launcher.brand=Pikamon`,
-      `-Dbitcoin.j=null`, // illustrative cleanup
-      `-Dorg.lwjgl.opengl.Window.name=Pikamon Client`, // Try to force window title
-      `-DlibraryDirectory=${path.join(path.join(app.getPath('appData'), '.launcher_1_21_1'), 'libraries')}`,
+      ...customJvmArgs,
       "-p",
       [
         "cpw/mods/bootstraplauncher/2.0.2/bootstraplauncher-2.0.2.jar",
@@ -752,9 +868,6 @@ ipcMain.handle('game:launch', async (_event: any, options: any) => {
 
   // Handle Server Auto-Connect if provided
   if (options.server) {
-    // MCLC supports quickPlay since recent versions, or we pass args manually
-    // opts.overrides.args = ["--server", options.server, "--port", options.port || "25565"]
-    // Let's use the quickPlay object if supported or fallback to args
     // @ts-ignore - quickPlay might not be fully typed in older definitions
     opts.quickPlay = {
       type: "multiplayer" as const,
@@ -763,15 +876,12 @@ ipcMain.handle('game:launch', async (_event: any, options: any) => {
   }
 
   launcher.on('debug', () => {
-    // console.log("[DEBUG]", e)
-    // win?.webContents.send('game:log', `[DEBUG] ${e}`)
   })
   launcher.on('data', (e) => {
     console.log("[DATA]", e)
     win?.webContents.send('game:data', `[DATA] ${e}`)
   })
   launcher.on('progress', (e) => {
-    // console.log("[PROGRESS]", e)
     win?.webContents.send('game:progress', e)
   })
   launcher.on('close', (e) => {
@@ -781,10 +891,7 @@ ipcMain.handle('game:launch', async (_event: any, options: any) => {
     win?.focus()
   })
   launcher.on('download-status', (e) => {
-    // console.log("[DOWNLOAD]", e)
     if (e.type && e.current && e.total) {
-      // Only show download progress if it's significant or for Java/Mods
-      // win?.webContents.send('game:log', `[DOWNLOAD] ${e.type} - ${Math.round((e.current / e.total) * 100)}%`)
     }
   })
 
@@ -815,8 +922,6 @@ ipcMain.handle('game:launch', async (_event: any, options: any) => {
 
     // Hide window when game launches
     win?.hide()
-
-    // Start trying to rename the game window
 
 
     return { success: true }
