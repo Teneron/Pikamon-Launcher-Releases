@@ -570,41 +570,32 @@ async function syncSingleResourcePack(root: string, packName: string, packUrl: s
   }
 }
 
-// Sync Resource Packs (main + additional from config)
+// Sync Resource Packs (from config)
 async function syncResourcePack(root: string) {
   const configUrl = "https://raw.githubusercontent.com/Teneron/Pikamon-Launcher-Releases/main/public/launcher-config.json";
-  let rpUrl = "";
-  let additionalPacks: { name: string; url: string }[] = [];
+  let packs: { name: string; url: string }[] = [];
 
   try {
     if (win) win.webContents.send('game:log', `[UPDATE] Verificando pacotes de texturas do servidor...`);
     const { data } = await import('axios').then(a => a.default.get(configUrl));
-    rpUrl = data.resourcePackUrl;
     if (data.resourcePacks && Array.isArray(data.resourcePacks)) {
-      additionalPacks = data.resourcePacks;
+      packs = data.resourcePacks;
     }
   } catch (err) {
     console.error("Failed to fetch dynamic config for resource pack:", err);
     // Fallback links in case GitHub is down
-    rpUrl = "https://www.dropbox.com/scl/fi/gcmkwkuwposkprg8nxdjm/Pikamon.zip?rlkey=9askwg6s3ba0pbc2ti4j6a5w2&st=9ldlutjb&dl=1";
-    additionalPacks = [
+    packs = [
       { name: "PikamonI.zip", url: "https://www.dropbox.com/scl/fi/lgpwmwoegsz3xw13s657q/PikamonI.zip?rlkey=zpxap6d9wdiwz4n87nfxupi9p&st=6p2lzicg&dl=1" },
       { name: "PikamonS.zip", url: "https://www.dropbox.com/scl/fi/epmnxfbahukz8my5lrdiv/PikamonS.zip?rlkey=jdiio5k6z6l99rq7gxkgktl5g&st=7sudesmr&dl=1" }
     ];
   }
 
-  // Sync main resource pack (Pikamon.zip)
-  if (rpUrl) {
-    await syncSingleResourcePack(root, 'Pikamon.zip', rpUrl);
-  }
-
-  // Sync additional resource packs (PikamonI.zip, PikamonS.zip, etc.)
-  for (const pack of additionalPacks) {
+  for (const pack of packs) {
     if (pack.name && pack.url) {
       try {
         await syncSingleResourcePack(root, pack.name, pack.url);
       } catch (err) {
-        console.error(`Failed to sync additional resource pack ${pack.name}:`, err);
+        console.error(`Failed to sync resource pack ${pack.name}:`, err);
         if (win) win.webContents.send('game:log', `[WARNING] Falha ao sincronizar ${pack.name}, continuando...`);
       }
     }
