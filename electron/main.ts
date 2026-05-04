@@ -299,7 +299,7 @@ async function syncMods(root: string) {
     console.error("Failed to fetch dynamic mods config:", err);
     if (win) win.webContents.send('game:log', `[WARNING] Não foi possível verificar o link dinâmico; usando o link embutido por segurança.`);
     // Fallback link in case GitHub is down or the repo is private/unavailable
-    modsUrl = "https://www.dropbox.com/scl/fi/do9cc5855idcmplmj9d54/mods.zip?rlkey=9q0two8mg3wut0w7nswh79zgl&st=28d3il90&dl=1";
+    modsUrl = "https://www.dropbox.com/scl/fi/mc1pljchyhfki9mr2bqv5/mods.zip?rlkey=vv8t3c90cw7md7ozz64en8ymr&st=i4d9db91&dl=1";
   }
   const modsDir = path.join(root, 'mods')
   const modsInfoPath = path.join(root, 'mods_info.json')
